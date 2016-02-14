@@ -19,17 +19,19 @@ var ddp = new DDP({
 // this will likely talk to meteor directly even if behind a proxy - likely will never need SSL or to change port
 // prod env will require nginx container, a self signed cert, directing 443: on the host, back into meteor on 3000
 
-Job.setDDP(ddp);                                // initalize meteor-job library ontop of ddp lib
-var docker = new Docker();                      // connect to local docker.sock passed from host into container as a volume 
+// initalize meteor-job library ontop of ddp lib
+Job.setDDP(ddp);                                
+ 
+// connect to local docker.sock passed from host into container as a volume 
+var docker = new Docker();                     
 
                                        
 // worker username credentials to authenticated to meteor to sub to jobs
 // passed to worker container via Env
 const workerUsername = process.env.WORKER_USERNAME || "worker";        
 const workerPass = process.env.WORKER_PASSWORD || "aStrongPass";
-/// REGISTER EVENT HANDLERS
-//try to ensure this is only run once after interval suceeds, maybe to establish reconnections if meteor comes back?
 
+/// REGISTER DDP EVENT HANDLERS
 ddp.on('socket-close', function(code, message) {
   console.log("Close: %s %s", code, message);
 });
@@ -39,7 +41,9 @@ ddp.on('socket-error', function(error) {
 });
 /////////////////////////////////// END
 
-// MAIN JOB //
+/////////////////////////////////////////////
+// Actual Job that gets run
+////////////////////////////////////////////////////////////////////////////
 function mainJob (job, cb) {
   const friendlyName = job.data.name
   const containerConfig = job.data.config
@@ -148,14 +152,6 @@ function checkContainerStatus(container){
 } 
 
 }
-
-//////////////////////////////////// END HELPERS
-
-
-
-/////////////////////////////////////////////
-// Actual Job that gets run
-////////////////////////////////////////////////////////////////////////////
 
 /// Connect to meteor server over DDP, 
 function runMainWorker (address, port) {
