@@ -6,8 +6,9 @@ const net = require('net');            // to check if meteor is running before t
 const stream = require('stream');
 const Promise = require('bluebird');
 const streamToPromise = require('stream-to-promise');
- 
-const meteorIP = 'manager'; // from ExtraHosts in workerConfig           
+
+// change 'manger' to 'localhost' if testing outside of container
+const meteorIP = (typeof process.env.WORKER_USERNAME != 'undefined') ? 'manager' : 'localhost'; // from ExtraHosts in workerConfig           
 const meteorPort = '3000';        
 
 var ddp = new DDP({
@@ -68,21 +69,16 @@ function mainJob (job, cb) {
     job.log("got result! Id: " + result.Id + " running: " + result.running, {echo:true});
     var container = docker.getContainer(result.Id);
     if(result.running){
-      container.inspect().then((info)=>{
-        job.done({
-                  Name: friendlyName,
-                  Id: info.Id,
-                  State: info.State,
-                  IP: info.NetworkSettings.IPAddress,
-                  Ports: Object.keys(info.Config.ExposedPorts),
-                  Env: createEnvObj(info.Config.Env) // created k:v for envionrment variables instead of ["V=X"]
-                  })
-          cb()
-    })
+      inspectAndDone();
     } else {
       container.start()
       .then((data)=>{
-        container.inspect().then((info)=>{
+        inspectAndDone();
+      });
+    }
+
+  function inspectAndDone(){
+    container.inspect().then((info)=>{
           job.done({
                     Name: friendlyName,
                     Id: info.Id,
@@ -90,16 +86,14 @@ function mainJob (job, cb) {
                     IP: info.NetworkSettings.IPAddress,
                     Ports: Object.keys(info.Config.ExposedPorts),
                     Env: createEnvObj(info.Config.Env) // created k:v for envionrment variables instead of ["V=X"]
-                  })
-          cb()
-        }).catch((err)=>{
+                })
+      cb()
+    }).catch((err)=>{
           job.log("ERROR: " + err, {echo:true, level:"warning"});
           job.fail(err)
           cb()
-        })
-      });
-    }
-
+    })
+  }
   
   function createEnvObj(envArray){
         var envObj = {}
@@ -142,8 +136,9 @@ function checkContainerStatus(container){
       })
       // image was pulled
       .then((result)=>{
+        job.log("pulled container image: " + containerConfig.Image, {echo:true});
         // a big buffer of everything streamed during pull
-      console.log(result.toString()); 
+      //console.log(result.toString()); 
       // create container 
       docker.createContainer(containerConfig)
       .then((cont)=>{
