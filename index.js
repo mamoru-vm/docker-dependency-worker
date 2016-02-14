@@ -64,10 +64,27 @@ function mainJob (job, cb) {
       cb()
     }
 
-  function inspectAndDone(){
+  function handleContainer(result){
+    job.log("got result! Id: " + result.Id + " running: " + result.running, {echo:true});
+    var container = docker.getContainer(result.Id);
+    if(result.running){
+      container.inspect().then((info)=>{
+        job.done({
+                  Name: friendlyName,
+                  Id: info.Id,
+                  State: info.State,
+                  IP: info.NetworkSettings.IPAddress,
+                  Ports: Object.keys(info.Config.ExposedPorts),
+                  Env: createEnvObj(info.Config.Env) // created k:v for envionrment variables instead of ["V=X"]
+                  })
+          cb()
+    })
+    } else {
+      container.start()
+      .then((data)=>{
         container.inspect().then((info)=>{
           job.done({
-                    Name: name,
+                    Name: friendlyName,
                     Id: info.Id,
                     State: info.State,
                     IP: info.NetworkSettings.IPAddress,
@@ -75,31 +92,23 @@ function mainJob (job, cb) {
                     Env: createEnvObj(info.Config.Env) // created k:v for envionrment variables instead of ["V=X"]
                   })
           cb()
-    })
+        }).catch((err)=>{
+          job.log("ERROR: " + err, {echo:true, level:"warning"});
+          job.fail(err)
+          cb()
+        })
+      });
+    }
+
   
-      function createEnvObj(envArray){
+  function createEnvObj(envArray){
         var envObj = {}
         for(var i=0;i<envArray.length;i++){
           var tmpArr = envArray[i].split('=')
           envObj[tmpArr[0]] = tmpArr[1]
         }
         return envObj
-      }
-
-
   }
-
-  function handleContainer(result){
-    var container = docker.getContainer(result.Id);
-    if(result.running){
-        inspectAndDone(job, cb)
-    } else {
-      container.start()
-      .then(()=>{
-        inspectAndDone(job, cb)
-      });
-    }
-
  
   }
 
