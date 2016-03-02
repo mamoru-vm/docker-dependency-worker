@@ -42,118 +42,234 @@ ddp.on('socket-error', function(error) {
 });
 /////////////////////////////////// END
 
+
+function checkContainerStatusNew(containers){
+   if(containers.length != 0) {
+    
+    if(container && upRegex.test(container.Status)){
+      job.log("do nothing, container is UP!", {echo:true});
+      job.done({running:true, Id: container.Id});
+    } else {
+      job.log("container is down!", {echo:true});
+      job.done({running:false, Id: container.Id});
+    }
+  } else {
+      job.log("container doesnt exist!", {echo:true});
+      job.done({running:false, Id: false});
+  }
+  }
+
+function getContainers(containerLabelorId, opts){
+  if(opts.by == "label"){
+    const labelFilter = `mamoru=${containerLabelorId}`
+    return new Promise((resolve,reject)=>{
+    docker.listContainers({all:true, filters:{"label":[labelFilter]}}).then((containers)=>{
+        if(containers != 0){
+          //only one container should be labeled as such, so return the one
+          resolve(containers[0])
+        } else {
+          // the container does not exist.
+          resolve(false)
+        }
+      })
+    })
+  } else if(opts.by == "Id") {
+    return new Promise((resolve, reject)=>{
+      docker.getContainer(containerLabelorId)
+      .then((cont)=>{
+        cont.inspect()
+        .then((details)=>{
+          resolve(details);
+        })
+      })
+    })
+  }
+}
+
+function createEnvObj(envArray){
+      var envObj = {}
+      for(var i=0;i<envArray.length;i++){
+        var tmpArr = envArray[i].split('=')
+        envObj[tmpArr[0]] = tmpArr[1]
+      }
+      return envObj
+}
+
+
+function checkCJob(job){
+    const friendlyName = job.data.label
+    var jobResponse = {up:false, containerId: null, details:null} // base response if container doesnt exist
+    job.log(`checking ${friendlyName}...`, {echo:true});
+   // find container by unique label, return status
+    const filterType = (job.data.Id == null) ? "label" : "Id"
+    const filterStr = (job.data.Id == null) ? job.data.label : job.data.Id
+    //can return one of three options - {up:false, Id: null}, {up:false, Id: id}, {up:true, Id: id}
+    getContainers(filterStr, {by:filterType})
+    .then(
+      (container)=>{
+        return new Promise((resolve,reject)=>{
+          if(container){
+            const upRegex = /^Up .*$/
+            var containerStatus = container.Status || ""
+            jobResponse.containerId = container.Id   // container exists, set Id
+            job.log(`container ${friendlyName} exists`, {echo:true})
+            if(upRegex.test(container.Status)){
+              job.log(`container ${friendlyName} is UP`, {echo:true})
+              jobResponse.up = true // container is up
+              // keep promise chain going to inspect running container
+              resolve(docker.getContainer(jobResponse.containerId))
+            } else {
+            // send to catch cause there is nothing to inspect
+             job.log(`response: ${jobResponse}`, {echo:true}) 
+             resolve(docker.getContainer(jobResponse.containerId))
+           // job.done(jobResponse)         // job done
+            }
+          } else {
+            //send to catch cause there is nothing to inspect
+            job.log(`response: ${jobResponse}`, {echo:true}) 
+            reject(jobResponse)
+          }
+      })
+    })      
+    .then(
+      (cont)=>{
+        job.log(`getting container details`, {echo:true})
+        cont.inspect()
+        .then(
+          (data)=>{
+          jobResponse.containerId = data.Id
+          jobResponse.details = {
+            State: data.State ,
+            IP: data.NetworkSettings.IPAddress,
+            Ports: Object.keys(data.Config.ExposedPorts),
+            Env: createEnvObj(data.Config.Env) // created k:v for envionrment variables instead of ["V=X"]
+          }
+          job.log(`job completed`, {echo:true})
+          job.done(jobResponse)         // job done
+        })
+        .catch((err)=>{
+          job.log(`JOB ERR: ${err}`, {level:"warning", echo:true});
+          job.fail(err);
+        })
+    })
+    .catch(
+      (downResponse)=>{
+        job.log(`job completed`, {echo:true})
+        job.done(downResponse)         // job done. container exists, but is not up...
+    })
+}
+
+function createCJob(job){
+ docker.pull(job.data.config.Image)
+ .then((stream)=>{
+    // just care that stream completed before resolving...
+    return streamToPromise(stream)
+ })
+ .then(
+  (result)=>{
+    job.log(`pulled container image: ${job.data.config.Image}`, {echo:true});
+    docker.createContainer(job.data.config)
+    .then(
+      (container)=>{
+      job.log(`created container: ${container.id}`, {echo:true});
+      job.done({up: false, Id: container.id})
+    })
+    .catch((err)=>{
+        job.log(`JOB ERR: ${err}`, {level:"warning", echo:true});
+        job.fail(err);
+    })
+ });
+}
+
+function startCJob(job){
+ var container = docker.getContainer(job.data.containerId);
+  job.log(`starting container: ${container.id}`, {echo:true});
+  container.start()
+  .then(
+    ()=>{
+      job.log(`inspecting container: ${container.id}`, {echo:true});
+      container.inspect()
+      .then(
+        (info)=>{
+          var resp = {
+            State: info.State,
+            IP: info.NetworkSettings.IPAddress,
+            Ports: Object.keys(info.Config.ExposedPorts),
+            Env: createEnvObj(info.Config.Env) // created k:v for envionrment variables instead of ["V=X"]
+          }
+          console.log("jobs DONE")
+          job.done({up: true, Id: info.id, details: resp });
+        }).catch((err)=>{
+          job.log(`JOB ERR: ${err}`, {level:"warning", echo:true});
+          job.fail(err);
+          })
+      })
+}
+
+function stopCJob(job){
+ var container = docker.getContainer(job.data.containerId)
+  container.stop()
+  .then(
+    ()=>{
+      job.log(`stopped container: ${container.id}`, {echo:true});
+        job.done({up: false, Id: container.id});
+  })
+  .catch((err)=>{
+  job.log(`JOB ERR: ${err}`, {level:"warning", echo:true});
+  job.fail(err);
+})
+}
+
+function removeCJob(job){
+ var container = docker.getContainer(job.data.containerId);
+ job.log(`removing container: ${container.id}`, {echo:true});
+ container.remove()
+ .then(
+    ()=>{
+      job.log(`removed container: ${container.id}`, {echo:true});
+      job.done({up: false, Id: null});
+    })
+    .catch((err)=>{
+  job.log(`JOB ERR: ${err}`, {level:"warning", echo:true});
+  job.fail(err);
+})
+}
+
+
+
+function restartCJob(job){
+ var container = docker.getContainer(job.data.containerId);
+  container.restart()
+  .then(
+    ()=>{
+      job.log(`restarted container: ${container.id}`, {echo:true});
+      job.done();
+    }).catch((err)=>{
+  job.log(`JOB ERR: ${err}`, {level:"warning", echo:true});
+  job.fail(err);
+})
+}
+
 /////////////////////////////////////////////
 // Actual Job that gets run
 ////////////////////////////////////////////////////////////////////////////
-function mainJob (job, cb) {
-  const friendlyName = job.data.name
-  const containerConfig = job.data.config
-  const labelKey = Object.keys(job.data.config.Labels)[0]
-  const labelFilter = `${labelKey}=${job.data.config.Labels[labelKey]}`
+function mainJob (job, cb) { 
+  const jobType = job.data.type
 
-    // what is actually happening woo promises
-    docker.listContainers({all:true, filters:{"label":[labelFilter]}})
-    .then(testIfContainerExits)
-    .then(checkContainerStatus)
-    .then(handleContainer)
-    .catch(logAndFail)
-
-
-    function logAndFail(err){
-      job.log(err, {echo:true, level:"warning"})
-      job.fail()
-      cb()
-    }
-
-  function handleContainer(result){
-    job.log("got result! Id: " + result.Id + " running: " + result.running, {echo:true});
-    var container = docker.getContainer(result.Id);
-    if(result.running){
-      inspectAndDone();
-    } else {
-      container.start()
-      .then((data)=>{
-        inspectAndDone();
-      });
-    }
-
-  function inspectAndDone(){
-    container.inspect().then((info)=>{
-          job.done({
-                    Name: friendlyName,
-                    Id: info.Id,
-                    State: info.State,
-                    IP: info.NetworkSettings.IPAddress,
-                    Ports: Object.keys(info.Config.ExposedPorts),
-                    Env: createEnvObj(info.Config.Env) // created k:v for envionrment variables instead of ["V=X"]
-                })
-      cb()
-    }).catch((err)=>{
-          job.log("ERROR: " + err, {echo:true, level:"warning"});
-          job.fail(err)
-          cb()
-    })
-  }
-  
-  function createEnvObj(envArray){
-        var envObj = {}
-        for(var i=0;i<envArray.length;i++){
-          var tmpArr = envArray[i].split('=')
-          envObj[tmpArr[0]] = tmpArr[1]
-        }
-        return envObj
-  }
- 
-  }
-
-
-  function testIfContainerExits(containers){
-    return new Promise((resolve,reject)=>{
-      if(containers.length != 0){
-        resolve(containers[0])
-      } else {
-        resolve(false);
-      }
-    })
-  }
-
-
-function checkContainerStatus(container){
-  return new Promise((resolve, reject)=>{
-    const upRegex = /^Up .*$/
-    if(container && upRegex.test(container.Status)){
-      job.log("do nothing, container is UP!", {echo:true});
-      resolve({running:true, Id: container.Id});
-    } else if(container && !upRegex.test(container.Status)) { // container exists but is not up...
-        job.log("need to start container, starting...", {echo:true});
-        resolve({running:false, Id: container.Id});
-    } else if(!container){
-      // pull just in case, if it is already local wont throw anything...
-      docker.pull(containerConfig.Image)
-      .then((stream)=>{
-        // just care that stream completed before resolving...
-        return streamToPromise(stream)
-      })
-      // image was pulled
-      .then((result)=>{
-        job.log("pulled container image: " + containerConfig.Image, {echo:true});
-        // a big buffer of everything streamed during pull
-      //console.log(result.toString()); 
-      // create container 
-      docker.createContainer(containerConfig)
-      .then((cont)=>{
-        job.log("created container!: "+ cont.id, {echo:true});
-        resolve({running: false, Id: cont.id})
-      })
-      })
-      .catch((err)=>{
-        console.log(err);
-        reject(err);
-      })
-    }
-
-  })
-} 
+  if (jobType == "check") {     // check container by label OR Id
+    checkCJob(job);
+  } else if (jobType == "create") { // create container from Config
+    createCJob(job);
+  } else if (jobType == "start") { // stop container by ID
+    startCJob(job);
+  } else if (jobType == "stop") { // stop container by ID
+    stopCJob(job);
+  } else if (jobType == "remove") { // remove container by ID
+    removeCJob(job);
+  } else if (jobType == "restart") { // restart container by ID
+    restartCJob(job);
+ }
+  cb()
 
 }
 
@@ -214,3 +330,104 @@ function testMeteorReady(address, port){
 // check if meteor connection is open over TCP before trying any ddp calls
 // this is is blocking, once DDP connects, it is blocking - could deamonize this and log to file
 testMeteorReady(meteorIP, meteorPort);
+
+
+/*
+    // what is actually happening woo promises
+    docker.listContainers({all:true, filters:{"label":[labelFilter]}})
+    .then(testIfContainerExits)
+    .then(checkContainerStatus)
+    .then(handleContainer)
+    .catch(logAndFail)
+
+
+
+    function logAndFail(err){
+      job.log(err, {echo:true, level:"warning"})
+      job.fail()
+      cb()
+    }
+
+  function handleContainer(result){
+    job.log("got result! Id: " + result.Id + " running: " + result.running, {echo:true});
+    var container = docker.getContainer(result.Id);
+    if(result.running){
+      inspectAndDone();
+    } else {
+      container.start()
+      .then((data)=>{
+        inspectAndDone();
+      });
+    }
+
+  function inspectAndDone(){
+    container.inspect().then((info)=>{
+          job.done({
+                    Name: friendlyName,
+                    Id: info.Id,
+                    State: info.State,
+                    IP: info.NetworkSettings.IPAddress,
+                    Ports: Object.keys(info.Config.ExposedPorts),
+                    Env: createEnvObj(info.Config.Env) // created k:v for envionrment variables instead of ["V=X"]
+                })
+      cb()
+    }).catch((err)=>{
+          job.log("ERROR: " + err, {echo:true, level:"warning"});
+          job.fail(err)
+          cb()
+    })
+  }
+  
+
+ 
+}
+
+
+  function testIfContainerExits(containers){
+    return new Promise((resolve,reject)=>{
+      if(containers.length != 0){
+        resolve(containers[0])
+      } else {
+        resolve(false);
+      }
+    })
+  }
+
+
+function checkContainerStatus(container){
+  return new Promise((resolve, reject)=>{
+    const upRegex = /^Up .*$/
+    if(container && upRegex.test(container.Status)){
+      job.log("do nothing, container is UP!", {echo:true});
+      resolve({running:true, Id: container.Id});
+    } else if(container && !upRegex.test(container.Status)) { // container exists but is not up...
+        job.log("need to start container, starting...", {echo:true});
+        resolve({running:false, Id: container.Id});
+    } else if(!container){
+      // pull just in case, if it is already local wont throw anything...
+      docker.pull(containerConfig.Image)
+      .then((stream)=>{
+        // just care that stream completed before resolving...
+        return streamToPromise(stream)
+      })
+      // image was pulled
+      .then((result)=>{
+        job.log("pulled container image: " + containerConfig.Image, {echo:true});
+        // a big buffer of everything streamed during pull
+      //console.log(result.toString()); 
+      // create container 
+      docker.createContainer(containerConfig)
+      .then((cont)=>{
+        job.log("created container!: "+ cont.id, {echo:true});
+        resolve({running: false, Id: cont.id})
+      })
+      })
+      .catch((err)=>{
+        console.log(err);
+        reject(err);
+      })
+    }
+
+  })
+} 
+*/
