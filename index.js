@@ -42,13 +42,16 @@ ddp.on('socket-error', function(error) {
 });
 /////////////////////////////////// END
 
-function getContainers(containerLabelorId, opts){
+function getContainers(job, opts){
   if(opts.by == "label"){
-    const labelFilter = `mamoru=${containerLabelorId}`
+    const labelFilter = `mamoru=${opts.LabelorId}`
     return new Promise((resolve,reject)=>{
-    docker.listContainers({all:true, filters:{"label":[labelFilter]}}).then((containers)=>{
+    job.log(`checking ${opts.LabelorId} by Label`, {echo:true});
+    docker.listContainers({all:true, filters:{"label":[labelFilter]}})
+    .then((containers)=>{
         if(containers != 0){
           //only one container should be labeled as such, so return the one
+          console.log(containers);
           resolve(containers[0])
         } else {
           // the container does not exist.
@@ -58,13 +61,14 @@ function getContainers(containerLabelorId, opts){
     })
   } else if(opts.by == "Id") {
     return new Promise((resolve, reject)=>{
-      console.log("checking container by ID");
-      container = docker.getContainer(containerLabelorId);
+     job.log(`checking ${opts.LabelorId} by ID`, {echo:true});
+      container = docker.getContainer(opts.LabelorId);
       container.inspect()
       .then((details)=>{
         resolve(details);
       })
       .catch((err)=>{
+        console.log(err)
         resolve(false);
       })
     })
@@ -87,32 +91,34 @@ function checkCJob(job){
     var jobResponse = {up:false, containerId: null, details:null} // base response if container doesnt exist
     job.log(`checking ${friendlyName}...`, {echo:true});
    // find container by unique label, return status
-    const filterType = (job.data.Id == null) ? "label" : "Id"
-    const filterStr = (job.data.Id == null) ? job.data.label : job.data.Id
+    const getContainerOpts = (job.data.Id == null) ? {by: "label", LabelorId: job.data.label}  : {by: "Id", LabelorId: job.data.Id}
+    console.log(getContainerOpts);
     //can return one of three options - {up:false, Id: null}, {up:false, Id: id}, {up:true, Id: id}
-    getContainers(filterStr, {by:filterType})
+    getContainers(job, getContainerOpts)
     .then(
       (container)=>{
         return new Promise((resolve,reject)=>{
           if(container){
-            const upRegex = /^Up .*$/
-            var containerStatus = container.Status || ""
-            jobResponse.containerId = container.Id   // container exists, set Id
             job.log(`container ${friendlyName} exists`, {echo:true})
-            if(upRegex.test(container.Status) || container.State.Running){
+            jobResponse.containerId = container.Id   // container exists, set Id
+            job.log(`container ID: ${jobResponse.containerId}`, {echo:true})
+            const upRegex = /^Up .*$/
+            var status = container.Status || ""     // if checking by label..
+            var state = container.State || {Running: false}    // if checking by ID
+            if(upRegex.test(status) || state.Running){
               job.log(`container ${friendlyName} is UP`, {echo:true})
               jobResponse.up = true // container is up
               // keep promise chain going to inspect running container
               resolve(docker.getContainer(jobResponse.containerId))
             } else {
-            // send to catch cause there is nothing to inspect
-             job.log(`response: ${jobResponse}`, {echo:true}) 
-             resolve(docker.getContainer(jobResponse.containerId))
+              // inspect the down container
+              resolve(docker.getContainer(jobResponse.containerId));
            // job.done(jobResponse)         // job done
             }
           } else {
             //send to catch cause there is nothing to inspect
-            job.log(`response: ${jobResponse}`, {echo:true}) 
+              console.log("send to catch cause there is nothing to inspect")
+              console.log(jobResponse);
             reject(jobResponse)
           }
       })
